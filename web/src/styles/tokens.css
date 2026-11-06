@@ -1,0 +1,29 @@
+:root {
+  --bg: #0f1115;
+  --fg: #e6e8ee;
+  --ok: #3ecf8e;
+  --bad: #ff6b6b;
+  --space: 1rem;
+  --radius: 8px;
+  --font: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+}
+
+#app {
+  padding: calc(var(--space) * 2);
+}
+
+.status {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  border-radius: var(--radius);
+  border: 1px solid currentColor;
+}
+.status.ok { color: var(--ok); }
+.status.bad { color: var(--bad); }

@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    level  TEXT NOT NULL,
+    event  TEXT NOT NULL,
+    detail TEXT,
+    at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Environment
+.env
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# Runtime data
+data/engine.db
+data/vectors/
+data/originals/
+data/pages/
+data/snapshots/
+data/reports/
+data/backups/
+
+# IDE
+.vscode/
