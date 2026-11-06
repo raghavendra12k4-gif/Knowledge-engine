@@ -1,89 +1,57 @@
-import shutil
 import sqlite3
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.core.config import settings
 from app.core.db import get_db
-from app.core.jobs import create_job
 from app.services.documents import (
     DuplicateDocumentError,
     count_documents,
-    create_document,
     delete_document,
     get_document,
-    get_document_by_hash,
     list_documents,
     set_status,
 )
-from app.services.ingest import IngestError, classify_kind, copy_original, hash_file
+from app.services.ingest import enqueue_ingest_job, ingest_file
 
 router = APIRouter()
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
 @router.post("/documents/upload")
-async def upload_document(
+def upload_document(
     file: UploadFile = File(...),
     db: sqlite3.Connection = Depends(get_db),
 ):
-    """Upload a file. Validates content by magic bytes, hashes it,
-    detects duplicates, stores the original, creates a document row
-    and an ingest job."""
-    temp_name = f".upload_{uuid.uuid4().hex}_{file.filename or 'upload'}"
+    """Store a bounded upload, detect duplicates, and enqueue content validation."""
+    filename = (file.filename or "upload").replace("\\", "/").rsplit("/", 1)[-1]
+    filename = filename.replace("\x00", "").strip() or "upload"
+    suffix = Path(filename).suffix.lower()
+    if len(suffix) > 20 or not suffix[1:].isalnum():
+        suffix = ""
+    temp_name = f".upload_{uuid.uuid4().hex}{suffix}"
     temp_path = settings.inbox_dir / temp_name
 
     try:
         with open(temp_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            total = 0
+            while chunk := file.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="file exceeds upload size limit")
+                buffer.write(chunk)
 
-        # Validate content by magic bytes before hashing.
-        from app.services.ingest import detect_kind_by_magic
-
-        detected = detect_kind_by_magic(temp_path)
-        if detected is None:
-            temp_path.unlink(missing_ok=True)
-            raise HTTPException(
-                status_code=400,
-                detail=f"unrecognized or corrupt file type: {file.filename}",
-            )
-
-        file_hash = hash_file(temp_path)
-
-        existing = get_document_by_hash(db, file_hash)
-        if existing is not None:
-            temp_path.unlink(missing_ok=True)
-            return {"duplicate": True, "document": existing}
-
-        kind = classify_kind(temp_path)
-        original_path = copy_original(temp_path, file_hash)
+        result = ingest_file(temp_path, db, title=filename, mime=file.content_type)
         temp_path.unlink(missing_ok=True)
-
-        doc = create_document(
-            db,
-            kind=kind,
-            title=file.filename or temp_path.name,
-            path=str(original_path),
-            file_hash=file_hash,
-            mime=file.content_type,
-            size_bytes=original_path.stat().st_size,
-        )
-
-        job_id = create_job(
-            db,
-            type="ingest",
-            payload={"document_id": doc["id"], "file_hash": file_hash},
-        )
-
-        return {"document": doc, "job_id": job_id, "duplicate": False}
+        return {**result, "duplicate": False}
 
     except DuplicateDocumentError as exc:
         temp_path.unlink(missing_ok=True)
         return {"duplicate": True, "document": exc.existing}
-    except IngestError as exc:
-        temp_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=str(exc))
     except HTTPException:
+        temp_path.unlink(missing_ok=True)
         raise
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -141,11 +109,7 @@ def reprocess_document(
     if doc is None:
         raise HTTPException(status_code=404, detail="document not found")
 
-    job_id = create_job(
-        db,
-        type="ingest",
-        payload={"document_id": doc_id, "file_hash": doc["file_hash"]},
-    )
     set_status(db, doc_id, "queued")
+    job_id = enqueue_ingest_job(db, doc_id, doc["file_hash"])
 
     return {"job_id": job_id, "document_id": doc_id}

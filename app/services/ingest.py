@@ -1,10 +1,17 @@
 import hashlib
+import json
+import logging
 import shutil
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
+
+import pymupdf
+from PIL import Image, UnidentifiedImageError
 
 from app.core.config import settings
 from app.core.db import connect
-from app.core.jobs import create_job
+from app.core.jobs import create_job, update_progress
 from app.core.progress import broadcaster
 from app.services.documents import (
     DuplicateDocumentError,
@@ -13,6 +20,8 @@ from app.services.documents import (
     get_document_by_hash,
     set_status,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class IngestError(Exception):
@@ -60,8 +69,8 @@ def classify_kind(path: Path | str) -> str:
 def detect_kind_by_magic(path: Path | str) -> str | None:
     """Detect file kind by reading magic bytes from the file header.
 
-    Returns the detected kind string, or None if the magic bytes are
-    unrecognized (treated as text for .md/.txt, or rejected for others).
+    Returns the detected kind string, or None if the contents are invalid
+    or unrecognized.
     """
     path = Path(path)
     try:
@@ -73,10 +82,42 @@ def detect_kind_by_magic(path: Path | str) -> str | None:
     # Check exact magic signatures first.
     for magic, kind in _MAGIC.items():
         if header.startswith(magic):
+            if magic == b"PK\x03\x04":
+                try:
+                    with zipfile.ZipFile(path) as zf:
+                        names = set(zf.namelist())
+                        if (
+                            "[Content_Types].xml" not in names
+                            or "word/document.xml" not in names
+                            or zf.testzip() is not None
+                        ):
+                            return None
+                        ET.fromstring(zf.read("[Content_Types].xml"))
+                        ET.fromstring(zf.read("word/document.xml"))
+                except (ET.ParseError, OSError, KeyError, zipfile.BadZipFile):
+                    return None
+            elif magic == b"%PDF-":
+                try:
+                    with pymupdf.open(path) as document:
+                        if document.page_count == 0:
+                            return None
+                except (pymupdf.FileDataError, RuntimeError, ValueError):
+                    return None
+            elif kind == "image":
+                try:
+                    with Image.open(path) as image:
+                        image.verify()
+                except (OSError, UnidentifiedImageError, ValueError):
+                    return None
             return kind
 
     # WEBP: starts with "RIFF" and has "WEBP" at bytes 8-11.
     if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        try:
+            with Image.open(path) as image:
+                image.verify()
+        except (OSError, UnidentifiedImageError, ValueError):
+            return None
         return "image"
 
     # HTML: check for common HTML starters (case-insensitive).
@@ -102,6 +143,7 @@ def copy_original(path: Path | str, file_hash: str) -> Path:
     """
     path = Path(path)
     dest = settings.originals_dir / f"{file_hash}{path.suffix.lower()}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
     if not dest.exists():
         shutil.copy2(path, dest)
     return dest
@@ -113,76 +155,73 @@ def remove_from_inbox(path: Path | str) -> None:
     try:
         path.unlink(missing_ok=True)
     except OSError:
-        pass
+        logger.exception("Could not remove inbox file %s", path)
 
 
 def move_to_rejected(path: Path | str) -> None:
     """Move a failed file into data/inbox/_rejected/ for inspection."""
     path = Path(path)
-    rejected_dir = settings.inbox_dir / "_rejected"
-    rejected_dir.mkdir(parents=True, exist_ok=True)
-    dest = rejected_dir / path.name
-    # Avoid name collisions.
-    counter = 1
-    stem = path.stem
-    suffix = path.suffix
-    while dest.exists():
-        dest = rejected_dir / f"{stem}_{counter}{suffix}"
-        counter += 1
     try:
+        rejected_dir = settings.inbox_dir / "_rejected"
+        rejected_dir.mkdir(parents=True, exist_ok=True)
+        dest = rejected_dir / path.name
+        counter = 1
+        stem = path.stem
+        suffix = path.suffix
+        while dest.exists():
+            dest = rejected_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
         shutil.move(str(path), str(dest))
     except OSError:
-        pass
+        logger.exception("Could not move failed inbox file %s to rejected folder", path)
 
 
-def ingest_file(path: Path | str, conn) -> dict:
-    """Full A1 ingest pipeline: hash, validate, dedupe, copy original,
-    create document + job.
+def enqueue_ingest_job(
+    conn, document_id: int, file_hash: str | None, inbox_path: Path | str | None = None
+) -> int:
+    payload = {"document_id": document_id, "file_hash": file_hash}
+    if inbox_path is not None:
+        payload["inbox_path"] = str(inbox_path)
+    job_id = create_job(conn, type="ingest", payload=payload)
+    payload["job_id"] = job_id
+    conn.execute(
+        "UPDATE jobs SET payload = ? WHERE id = ?", (json.dumps(payload), job_id)
+    )
+    conn.commit()
+    return job_id
 
-    Raises DuplicateDocumentError if a document with the same hash
-    already exists.  Raises IngestError if the file fails validation.
+
+def ingest_file(
+    path: Path | str,
+    conn,
+    *,
+    title: str | None = None,
+    mime: str | None = None,
+    inbox_path: Path | str | None = None,
+) -> dict:
+    """Preserve the original and enqueue validation/ingestion for a file.
+
+    Invalid file contents are recorded as failed jobs by the worker, so
+    watched-folder files remain visible with an error instead of disappearing.
     """
     path = Path(path)
-
-    # --- Magic-byte content validation ---
-    detected = detect_kind_by_magic(path)
-    if detected is None:
-        raise IngestError(f"unrecognized or corrupt file type: {path.name}")
-
-    # --- Hash for duplicate detection ---
     file_hash = hash_file(path)
 
     existing = get_document_by_hash(conn, file_hash)
     if existing is not None:
         raise DuplicateDocumentError(existing)
 
-    # --- Classify kind by extension (after magic validation passed) ---
-    kind = classify_kind(path)
-
-    # --- Copy original (never modified) ---
     original_path = copy_original(path, file_hash)
-
-    # --- Create document row ---
     doc = create_document(
         conn,
-        kind=kind,
-        title=path.name,
+        kind=classify_kind(path),
+        title=title or path.name,
         path=str(original_path),
         file_hash=file_hash,
-        mime=None,
+        mime=mime,
         size_bytes=path.stat().st_size,
     )
-
-    # --- Create ingest job ---
-    job_id = create_job(
-        conn,
-        type="ingest",
-        payload={
-            "document_id": doc["id"],
-            "file_hash": file_hash,
-            "inbox_path": str(path),
-        },
-    )
+    job_id = enqueue_ingest_job(conn, doc["id"], file_hash, inbox_path)
 
     return {"document": doc, "job_id": job_id}
 
@@ -195,6 +234,7 @@ async def handle_ingest_job(payload: dict) -> dict:
     On failure moves it to inbox/_rejected/.
     """
     document_id = int(payload["document_id"])
+    job_id = payload.get("job_id")
     inbox_path = payload.get("inbox_path")
     conn = connect()
     try:
@@ -203,20 +243,32 @@ async def handle_ingest_job(payload: dict) -> dict:
             raise ValueError(f"document {document_id} not found")
 
         set_status(conn, document_id, "processing")
+        if job_id is not None:
+            update_progress(conn, job_id, 10.0)
         await broadcaster.publish(
-            document_id,
-            {"kind": "progress", "document_id": document_id, "status": "processing"},
+            job_id if job_id is not None else document_id,
+            {
+                "kind": "progress",
+                "document_id": document_id,
+                "status": "processing",
+                "progress": 10.0,
+            },
         )
 
         original_path = Path(doc["path"])
         if not original_path.exists():
             raise FileNotFoundError(f"original not found: {original_path}")
+        detected = detect_kind_by_magic(original_path)
+        if detected is None:
+            raise IngestError(f"unrecognized or corrupt file type: {original_path.name}")
+        if classify_kind(original_path) != detected:
+            raise IngestError(f"file type mismatch: {original_path.name}")
 
-        # Stage A1 does not extract text yet (that's A2/A3).
-        # Mark ready once the original is confirmed on disk.
+        if job_id is not None:
+            update_progress(conn, job_id, 90.0)
         set_status(conn, document_id, "ready")
         await broadcaster.publish(
-            document_id,
+            job_id if job_id is not None else document_id,
             {
                 "kind": "progress",
                 "document_id": document_id,
@@ -225,7 +277,6 @@ async def handle_ingest_job(payload: dict) -> dict:
             },
         )
 
-        # Clean up inbox file on success.
         if inbox_path:
             remove_from_inbox(inbox_path)
 
@@ -233,14 +284,13 @@ async def handle_ingest_job(payload: dict) -> dict:
     except Exception as exc:  # noqa: BLE001 - mark failed, keep queue alive
         set_status(conn, document_id, "failed", error=str(exc))
         await broadcaster.publish(
-            document_id,
+            job_id if job_id is not None else document_id,
             {
                 "kind": "failed",
                 "document_id": document_id,
                 "error": str(exc),
             },
         )
-        # Move rejected file out of the inbox.
         if inbox_path:
             move_to_rejected(inbox_path)
         raise

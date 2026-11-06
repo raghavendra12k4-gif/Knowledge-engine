@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 
 KINDS = ("note", "pdf", "docx", "image", "web", "report", "text")
 STATUSES = ("queued", "processing", "ready", "needs_review", "failed")
@@ -65,21 +66,28 @@ def get_document_by_hash(conn, file_hash) -> dict | None:
     return None if row is None else _row_to_dict(row)
 
 
-def _filters(status, kind):
+def _filters(status, kind, table_alias: str | None = None):
     sql = " WHERE 1=1"
     params = []
     if status is not None:
-        sql += " AND status = ?"
+        sql += f" AND {table_alias + '.' if table_alias else ''}status = ?"
         params.append(status)
     if kind is not None:
-        sql += " AND kind = ?"
+        sql += f" AND {table_alias + '.' if table_alias else ''}kind = ?"
         params.append(kind)
     return sql, params
 
 
 def list_documents(conn, *, status=None, kind=None, limit=100, offset=0) -> list[dict]:
-    where, params = _filters(status, kind)
-    sql = "SELECT * FROM documents" + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
+    where, params = _filters(status, kind, table_alias="d")
+    sql = """SELECT d.*, j.id AS job_id, j.progress AS job_progress
+             FROM documents AS d
+             LEFT JOIN jobs AS j ON j.id = (
+                 SELECT MAX(candidate.id)
+                 FROM jobs AS candidate
+                 WHERE candidate.type = 'ingest'
+                   AND json_extract(candidate.payload, '$.document_id') = d.id
+             )""" + where + " ORDER BY d.id DESC LIMIT ? OFFSET ?"
     rows = conn.execute(sql, [*params, limit, offset]).fetchall()
     return [_row_to_dict(r) for r in rows]
 
@@ -145,6 +153,22 @@ def update_document(
 
 
 def delete_document(conn, doc_id) -> bool:
+    doc = get_document(conn, doc_id)
+    if doc is None:
+        return False
+    # Remove associated jobs.
+    conn.execute("DELETE FROM jobs WHERE json_extract(payload, '$.document_id') = ?", (doc_id,))
     cur = conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
     conn.commit()
-    return cur.rowcount > 0
+    if cur.rowcount <= 0:
+        return False
+    # Clean up original file only if no other document references it.
+    remaining = conn.execute(
+        "SELECT 1 FROM documents WHERE file_hash = ? LIMIT 1", (doc["file_hash"],)
+    ).fetchone()
+    if remaining is None and doc.get("path"):
+        try:
+            Path(doc["path"]).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True

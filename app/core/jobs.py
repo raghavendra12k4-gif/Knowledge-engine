@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -23,7 +24,10 @@ def create_job(conn: sqlite3.Connection, *, type: str, payload: dict) -> int:
         (type, json.dumps(payload), _now(), _now()),
     )
     conn.commit()
-    return cur.lastrowid
+    job_id = cur.lastrowid
+    if job_id is None:
+        raise RuntimeError("Job insert did not produce an ID")
+    return job_id
 
 
 def claim_job(conn: sqlite3.Connection) -> dict | None:
@@ -75,7 +79,7 @@ def complete_job(
         """UPDATE jobs SET status = ?, result = ?, error = ?, updated_at = ?,
                    progress = COALESCE(?, progress)
            WHERE id = ?""",
-        (status, json.dumps(result) if result else None, error, now, progress, job_id),
+        (status, json.dumps(result) if result is not None else None, error, now, progress, job_id),
     )
     conn.commit()
     try:
@@ -117,7 +121,6 @@ def requeue_stale_jobs(conn: sqlite3.Connection) -> list[int]:
 async def run_worker(
     handlers: dict,
     poll_interval: float = 1.0,
-    concurrency: int = 2,
 ) -> None:
     """Asyncio job worker. Runs until cancelled.
 
@@ -148,10 +151,11 @@ async def run_worker(
 
         try:
             payload = json.loads(job["payload"] or "{}")
+            payload.setdefault("job_id", job_id)
             await broadcaster.publish(
                 job_id, {"kind": "started", "status": "running"}
             )
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 result = await handler(payload)
             else:
                 result = handler(payload)

@@ -37,6 +37,7 @@ export function mountLibrary(container) {
           <strong>Duplicate detected:</strong> <span id="duplicate-title"></span>
           <button class="btn btn-link" id="duplicate-open">Open existing</button>
         </div>
+        <p id="library-error" class="library-error" role="alert" hidden></p>
       </div>
 
       <div class="library-table-wrap">
@@ -57,6 +58,18 @@ export function mountLibrary(container) {
       <div id="empty-state" class="empty-state" style="display:none;">
         <p>No documents yet. Drop files here or copy them into <code>data/inbox/</code>.</p>
       </div>
+      <dialog id="document-dialog" class="document-dialog">
+        <form method="dialog" class="dialog-close">
+          <button class="btn btn-link" aria-label="Close document details">Close</button>
+        </form>
+        <h3 id="detail-title"></h3>
+        <dl>
+          <dt>Type</dt><dd id="detail-kind"></dd>
+          <dt>Status</dt><dd id="detail-status"></dd>
+          <dt>Error</dt><dd id="detail-error"></dd>
+          <dt>Added</dt><dd id="detail-created"></dd>
+        </dl>
+      </dialog>
     </div>
   `;
 
@@ -68,7 +81,15 @@ export function mountLibrary(container) {
   const duplicateNotice = container.querySelector("#duplicate-notice");
   const duplicateTitle = container.querySelector("#duplicate-title");
   const duplicateOpen = container.querySelector("#duplicate-open");
+  const libraryError = container.querySelector("#library-error");
+  const detailDialog = container.querySelector("#document-dialog");
+  const detailTitle = container.querySelector("#detail-title");
+  const detailKind = container.querySelector("#detail-kind");
+  const detailStatus = container.querySelector("#detail-status");
+  const detailError = container.querySelector("#detail-error");
+  const detailCreated = container.querySelector("#detail-created");
 
+  const activeSources = new Map();
   let pendingDuplicateDoc = null;
 
   browseBtn.addEventListener("click", () => fileInput.click());
@@ -99,8 +120,13 @@ export function mountLibrary(container) {
     e.target.value = "";
   });
 
-  duplicateOpen.addEventListener("click", () => {
+  duplicateOpen.addEventListener("click", async () => {
     if (pendingDuplicateDoc) {
+      try {
+        await openDocument(pendingDuplicateDoc.id);
+      } catch (err) {
+        showError(`Could not open document: ${err.message}`);
+      }
       duplicateNotice.style.display = "none";
       pendingDuplicateDoc = null;
     }
@@ -115,28 +141,56 @@ export function mountLibrary(container) {
         duplicateNotice.style.display = "block";
       } else {
         await loadDocuments();
-        if (res.job_id) {
-          subscribeJobEvents(res.job_id, (ev) => {
-            const fill = container.querySelector(`#fill-${res.document.id}`);
-            if (fill && ev.progress != null) fill.style.width = `${ev.progress}%`;
-            if (ev.status) {
-              const chip = container.querySelector(`tr[data-doc="${res.document.id}"] .status-chip`);
-              // reload documents on terminal status
-              if (ev.status === "ready" || ev.status === "failed" || ev.status === "needs_review") {
-                loadDocuments();
-              }
-            }
-          });
-        }
       }
     } catch (err) {
-      alert(`Upload failed: ${err.message}`);
+      showError(`Upload failed: ${err.message}`);
     }
   }
 
   async function loadDocuments() {
     const data = await listDocuments();
+    libraryError.hidden = true;
     renderDocuments(data.documents || []);
+    for (const doc of data.documents || []) {
+      if (doc.job_id && ["queued", "processing"].includes(doc.status)) {
+        trackJob(doc.id, doc.job_id);
+      }
+    }
+  }
+
+  function showError(message) {
+    libraryError.textContent = message;
+    libraryError.hidden = false;
+  }
+
+  function trackJob(docId, jobId) {
+    if (activeSources.has(jobId)) return;
+    const source = subscribeJobEvents(jobId, (event) => {
+      const fill = container.querySelector(`#fill-${docId}`);
+      if (fill && event.progress != null) {
+        fill.style.width = `${Math.max(0, Math.min(100, event.progress))}%`;
+      }
+      if (
+        event.kind === "completed" ||
+        event.kind === "failed" ||
+        ["done", "failed", "cancelled"].includes(event.status)
+      ) {
+        source.close();
+        activeSources.delete(jobId);
+      }
+      loadDocuments().catch((err) => showError(`Could not refresh library: ${err.message}`));
+    });
+    activeSources.set(jobId, source);
+  }
+
+  async function openDocument(id) {
+    const doc = await getDocument(id);
+    detailTitle.textContent = doc.title;
+    detailKind.textContent = doc.kind;
+    detailStatus.textContent = doc.status;
+    detailError.textContent = doc.error || "None";
+    detailCreated.textContent = doc.created_at;
+    detailDialog.showModal();
   }
 
   function renderDocuments(docs) {
@@ -145,16 +199,20 @@ export function mountLibrary(container) {
 
     for (const doc of docs) {
       const row = document.createElement("tr");
+      row.dataset.doc = doc.id;
       const statusClass = STATUS_CLASSES[doc.status] || "status-queued";
       const label = STATUS_LABELS[doc.status] || doc.status;
 
       row.innerHTML = `
-        <td class="doc-title">${escapeHtml(doc.title)}</td>
+        <td class="doc-title"><button class="btn btn-link btn-open" data-id="${doc.id}">${escapeHtml(doc.title)}</button></td>
         <td>${escapeHtml(doc.kind)}</td>
-        <td><span class="status-chip ${statusClass}">${label}</span></td>
+        <td>
+          <span class="status-chip ${statusClass}">${label}</span>
+          ${doc.error ? `<small class="doc-error">${escapeHtml(doc.error)}</small>` : ""}
+        </td>
         <td>
           <div class="progress-bar" id="progress-${doc.id}">
-            <div class="progress-fill" id="fill-${doc.id}" style="width:0%"></div>
+            <div class="progress-fill" id="fill-${doc.id}" style="width:${Math.max(0, Math.min(100, doc.job_progress || 0))}%"></div>
           </div>
         </td>
         <td class="doc-actions">
@@ -164,11 +222,6 @@ export function mountLibrary(container) {
       `;
 
       docList.appendChild(row);
-
-      // Subscribe to job events if there's a recent job for this document.
-      // We poll the document list to find the latest job, but for now
-      // we'll just show the current status. SSE subscription happens
-      // when a new upload creates a job.
     }
   }
 
@@ -177,29 +230,40 @@ export function mountLibrary(container) {
     const btn = e.target.closest("button");
     if (!btn) return;
     const id = Number(btn.dataset.id);
-    if (btn.classList.contains("btn-delete")) {
+    if (btn.classList.contains("btn-open")) {
+      try {
+        await openDocument(id);
+      } catch (err) {
+        showError(`Could not open document: ${err.message}`);
+      }
+    } else if (btn.classList.contains("btn-delete")) {
       if (!confirm("Delete this document?")) return;
       try {
         await deleteDocument(id);
         await loadDocuments();
       } catch (err) {
-        alert(`Delete failed: ${err.message}`);
+        showError(`Delete failed: ${err.message}`);
       }
     } else if (btn.classList.contains("btn-retry")) {
       try {
         await reprocessDocument(id);
         await loadDocuments();
       } catch (err) {
-        alert(`Reprocess failed: ${err.message}`);
+        showError(`Reprocess failed: ${err.message}`);
       }
     }
   });
 
-  // Initial load
-  loadDocuments();
+  const refreshTimer = window.setInterval(() => {
+    loadDocuments().catch((err) => showError(`Could not refresh library: ${err.message}`));
+  }, 2000);
+  loadDocuments().catch((err) => showError(`Could not load library: ${err.message}`));
 
   return {
     unmount: () => {
+      window.clearInterval(refreshTimer);
+      activeSources.forEach((es) => es.close());
+      activeSources.clear();
       container.innerHTML = "";
     },
   };

@@ -51,13 +51,16 @@ export const uploadDocument = (file) => {
 
 export const subscribeJobEvents = (jobId, onEvent) => {
   const es = new EventSource(`${BASE}/jobs/${jobId}/events`);
-  es.onmessage = (e) => {
+  const handler = (e) => {
     try {
       onEvent(JSON.parse(e.data));
     } catch {
-      onEvent(JSON.parse(e.data));
+      onEvent(e.data);
     }
   };
-  es.onerror = () => es.close();
+  for (const name of ["state", "started", "progress", "completed", "failed"]) {
+    es.addEventListener(name, handler);
+  }
+  es.onmessage = handler;
   return es;
 };

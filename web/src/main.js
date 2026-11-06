@@ -1,4 +1,5 @@
 import "./styles/tokens.css";
+import "./style.css";
 import { health } from "./api.js";
 import { mountLibrary } from "./screens/library.js";
 

@@ -2,9 +2,12 @@ import asyncio
 import hashlib
 from pathlib import Path
 
+import pymupdf
 import pytest
+from docx import Document
+from PIL import Image
 
-from app.core.config import Settings
+from app.core.config import settings
 from app.core.db import connect, run_migrations
 from app.core.jobs import (
     claim_job,
@@ -16,7 +19,6 @@ from app.core.jobs import (
 from app.core.progress import broadcaster
 from app.services.documents import DuplicateDocumentError
 from app.services.ingest import (
-    IngestError,
     classify_kind,
     copy_original,
     detect_kind_by_magic,
@@ -53,31 +55,48 @@ def test_hash_file_different_content(tmp_path):
 
 def test_detect_pdf_magic(tmp_path):
     p = tmp_path / "x.pdf"
-    p.write_bytes(b"%PDF-1.4\nfake content")
+    document = pymupdf.open()
+    document.new_page()
+    document.save(p)
+    document.close()
     assert detect_kind_by_magic(p) == "pdf"
+
+
+def test_detect_corrupt_pdf_magic(tmp_path):
+    p = tmp_path / "broken.pdf"
+    p.write_bytes(b"%PDF-1.4\nnot a real PDF")
+    assert detect_kind_by_magic(p) is None
 
 
 def test_detect_docx_magic(tmp_path):
     p = tmp_path / "x.docx"
-    p.write_bytes(b"PK\x03\x04" + b"\x00" * 100)
+    document = Document()
+    document.add_paragraph("Valid document")
+    document.save(p)
     assert detect_kind_by_magic(p) == "docx"
+
+
+def test_detect_corrupt_docx_magic(tmp_path):
+    p = tmp_path / "broken.docx"
+    p.write_bytes(b"PK\x03\x04not a Word document")
+    assert detect_kind_by_magic(p) is None
 
 
 def test_detect_png_magic(tmp_path):
     p = tmp_path / "x.png"
-    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    Image.new("RGB", (1, 1)).save(p, format="PNG")
     assert detect_kind_by_magic(p) == "image"
 
 
 def test_detect_jpg_magic(tmp_path):
     p = tmp_path / "x.jpg"
-    p.write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+    Image.new("RGB", (1, 1)).save(p, format="JPEG")
     assert detect_kind_by_magic(p) == "image"
 
 
 def test_detect_webp_magic(tmp_path):
     p = tmp_path / "x.webp"
-    p.write_bytes(b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 100)
+    Image.new("RGB", (1, 1)).save(p, format="WEBP")
     assert detect_kind_by_magic(p) == "image"
 
 
@@ -131,7 +150,8 @@ def test_classify_kind(ext, kind):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def db_conn(tmp_path):
+def db_conn(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
     c = connect(tmp_path / "t.db")
     run_migrations(c)
     yield c
@@ -170,18 +190,23 @@ def test_ingest_duplicate_hash_raises(tmp_path, db_conn):
         ingest_file(p2, db_conn)
 
 
-def test_ingest_corrupt_file_raises(tmp_path, db_conn):
+def test_ingest_corrupt_file_is_enqueued_for_validation(tmp_path, db_conn):
     p = tmp_path / "fake.pdf"
     p.write_bytes(b"MZ\x90\x00\x03fake exe")
-    with pytest.raises(IngestError):
-        ingest_file(p, db_conn)
+    result = ingest_file(p, db_conn)
+    assert result["document"]["status"] == "queued"
+    assert result["document"]["kind"] == "pdf"
+    job = get_job(db_conn, result["job_id"])
+    assert job is not None
+    assert job["status"] == "queued"
 
 
 # ---------------------------------------------------------------------------
 # copy_original / remove_from_inbox / move_to_rejected
 # ---------------------------------------------------------------------------
 
-def test_copy_original_idempotent(tmp_path):
+def test_copy_original_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
     src = tmp_path / "x.txt"
     src.write_text("data")
     file_hash = hash_file(src)
@@ -199,14 +224,13 @@ def test_remove_from_inbox_missing_ok(tmp_path):
 
 
 def test_move_to_rejected(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        Settings, "inbox_dir", property(lambda self: tmp_path)
-    )
-    src = tmp_path / "bad.pdf"
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
+    settings.inbox_dir.mkdir(parents=True)
+    src = settings.inbox_dir / "bad.pdf"
     src.write_bytes(b"garbage")
     move_to_rejected(src)
     assert not src.exists()
-    rejected_files = list((tmp_path / "_rejected").iterdir())
+    rejected_files = list((settings.inbox_dir / "_rejected").iterdir())
     assert len(rejected_files) == 1
 
 

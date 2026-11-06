@@ -27,19 +27,23 @@ async def lifespan(app: FastAPI):
 
     handlers = {"ingest": handle_ingest_job}
     worker_task = asyncio.create_task(run_worker(handlers))
-
-    observer = start_watchdog()
-
-    yield
-
-    worker_task.cancel()
+    watcher = start_watchdog()
+    app.state.worker_task = worker_task
+    app.state.watcher = watcher
     try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
-
-    observer.stop()
-    observer.join()
+        yield
+    finally:
+        try:
+            watcher.stop()
+        finally:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                app.state.worker_task = None
+                app.state.watcher = None
 
 
 def create_app() -> FastAPI:
