@@ -3,4 +3,4 @@ def test_health(client):
     assert res.status_code == 200
     body = res.json()
     assert body["status"] == "ok"
-    assert body["schema_version"] == 1
+    assert body["schema_version"] == 2

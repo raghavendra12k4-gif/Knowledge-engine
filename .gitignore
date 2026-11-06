@@ -21,5 +21,8 @@ data/snapshots/
 data/reports/
 data/backups/
 
+# Build spec
+KNOWLEDGE_ENGINE_BUILD_SPEC.md
+
 # IDE
 .vscode/

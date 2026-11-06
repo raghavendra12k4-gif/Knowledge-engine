@@ -10,6 +10,8 @@ from app.routers import health
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    for d in (settings.originals_dir, settings.inbox_dir, settings.pages_dir):
+        d.mkdir(parents=True, exist_ok=True)
     init_db()
     yield
 

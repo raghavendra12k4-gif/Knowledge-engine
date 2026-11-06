@@ -3,7 +3,7 @@ from app.core.db import connect, run_migrations
 
 def test_migrations_apply_once(tmp_path):
     conn = connect(tmp_path / "t.db")
-    assert run_migrations(conn) == [1]
+    assert run_migrations(conn) == [1, 2]
     assert run_migrations(conn) == []  # idempotent
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}

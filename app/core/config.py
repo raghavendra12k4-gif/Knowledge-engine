@@ -13,6 +13,18 @@ class Settings(BaseSettings):
     dev_origin: str = "http://localhost:5173"
 
     @property
+    def originals_dir(self) -> Path:
+        return self.data_dir / "originals"
+
+    @property
+    def inbox_dir(self) -> Path:
+        return self.data_dir / "inbox"
+
+    @property
+    def pages_dir(self) -> Path:
+        return self.data_dir / "pages"
+
+    @property
     def db_path(self) -> Path:
         return self.data_dir / self.db_filename
 
