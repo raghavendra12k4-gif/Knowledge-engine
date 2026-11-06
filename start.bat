@@ -7,4 +7,4 @@ start "Frontend" cmd /k "cd web && npm run dev"
 timeout /t 4 /nobreak >nul
 start http://localhost:5173
 
-// .\start.bat : paste this in terminal to start the server
+rem .\start.bat: paste in terminal to start the server

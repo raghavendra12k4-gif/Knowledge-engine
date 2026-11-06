@@ -10,6 +10,11 @@ dependencies = [
     "sqlalchemy",
     "alembic",
     "aiosqlite",
+    "watchdog",
+    "python-multipart",
+    "pymupdf",
+    "python-docx",
+    "sse-starlette",
 ]
 
 [tool.pytest.ini_options]

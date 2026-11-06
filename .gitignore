@@ -13,6 +13,7 @@ web/node_modules/
 web/dist/
 
 # Runtime data
+data/inbox/
 data/engine.db
 data/vectors/
 data/originals/
