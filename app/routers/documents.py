@@ -104,10 +104,16 @@ def reprocess_document(
     doc_id: int,
     db: sqlite3.Connection = Depends(get_db),
 ):
-    """Re-queue an ingest job for an existing document."""
+    """Re-queue an ingest job for an existing document.
+
+    Refused with 409 while the document is already queued or processing, so a
+    double click cannot create a second job for the same document.
+    """
     doc = get_document(db, doc_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="document not found")
+    if doc["status"] in ("queued", "processing"):
+        raise HTTPException(status_code=409, detail="document is already queued or processing")
 
     set_status(db, doc_id, "queued")
     job_id = enqueue_ingest_job(db, doc_id, doc["file_hash"])

@@ -1,3 +1,4 @@
+﻿import asyncio
 import hashlib
 import json
 import logging
@@ -13,6 +14,7 @@ from app.core.config import settings
 from app.core.db import connect
 from app.core.jobs import create_job, update_progress
 from app.core.progress import broadcaster
+from app.services.chunks import store_extraction, wipe_document_derived
 from app.services.documents import (
     DuplicateDocumentError,
     create_document,
@@ -20,6 +22,7 @@ from app.services.documents import (
     get_document_by_hash,
     set_status,
 )
+from app.services.extract import extract_document
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,8 @@ _EXTENSION_MAP = {
     ".txt": "text",
     ".pdf": "pdf",
     ".docx": "docx",
+    ".ppt": "pptx",
+    ".pptx": "pptx",
     ".png": "image",
     ".jpg": "image",
     ".jpeg": "image",
@@ -41,7 +46,6 @@ _EXTENSION_MAP = {
     ".htm": "web",
 }
 
-# Magic byte signatures for content validation.
 _MAGIC = {
     b"%PDF-": "pdf",
     b"PK\x03\x04": "docx",
@@ -49,9 +53,12 @@ _MAGIC = {
     b"\xff\xd8\xff": "image",
 }
 
+_LEADING_JUNK = b"\xef\xbb\xbf \t\r\n"
+_HTML_STARTERS = (b"<!doctype", b"<html", b"<head", b"<body", b"<?xml", b"<!--")
+_HEADER_BYTES = 1024
+
 
 def hash_file(path: Path | str) -> str:
-    """Return the SHA-256 hex digest of a file's contents."""
     path = Path(path)
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -61,39 +68,34 @@ def hash_file(path: Path | str) -> str:
 
 
 def classify_kind(path: Path | str) -> str:
-    """Map a file extension to a documents.kind value."""
     path = Path(path)
     return _EXTENSION_MAP.get(path.suffix.lower(), "text")
 
 
 def detect_kind_by_magic(path: Path | str) -> str | None:
-    """Detect file kind by reading magic bytes from the file header.
-
-    Returns the detected kind string, or None if the contents are invalid
-    or unrecognized.
-    """
     path = Path(path)
     try:
         with open(path, "rb") as f:
-            header = f.read(262)
+            header = f.read(_HEADER_BYTES)
     except OSError:
         return None
 
-    # Check exact magic signatures first.
     for magic, kind in _MAGIC.items():
         if header.startswith(magic):
             if magic == b"PK\x03\x04":
                 try:
                     with zipfile.ZipFile(path) as zf:
                         names = set(zf.namelist())
-                        if (
-                            "[Content_Types].xml" not in names
-                            or "word/document.xml" not in names
-                            or zf.testzip() is not None
-                        ):
+                        if "[Content_Types].xml" not in names or zf.testzip() is not None:
                             return None
                         ET.fromstring(zf.read("[Content_Types].xml"))
-                        ET.fromstring(zf.read("word/document.xml"))
+                        if "word/document.xml" in names:
+                            ET.fromstring(zf.read("word/document.xml"))
+                            return "docx"
+                        if "ppt/presentation.xml" in names and "ppt/slides/slide1.xml" in names:
+                            ET.fromstring(zf.read("ppt/presentation.xml"))
+                            return "pptx"
+                        return None
                 except (ET.ParseError, OSError, KeyError, zipfile.BadZipFile):
                     return None
             elif magic == b"%PDF-":
@@ -111,7 +113,6 @@ def detect_kind_by_magic(path: Path | str) -> str | None:
                     return None
             return kind
 
-    # WEBP: starts with "RIFF" and has "WEBP" at bytes 8-11.
     if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
         try:
             with Image.open(path) as image:
@@ -120,27 +121,22 @@ def detect_kind_by_magic(path: Path | str) -> str | None:
             return None
         return "image"
 
-    # HTML: check for common HTML starters (case-insensitive).
-    text_start = header[:64].lstrip()
-    lower = text_start.lower()
-    if lower.startswith((b"<!doctype", b"<html", b"<head", b"<body")):
-        return "web"
-
-    # For text extensions, accept if there are no NUL bytes (binary indicator).
     ext = path.suffix.lower()
     if ext in (".md", ".txt"):
-        if b"\x00" not in header:
-            return "text"
-        return None
+        return "text" if b"\x00" not in header else None
 
+    stripped = header.lstrip(_LEADING_JUNK)
+    if ext in (".html", ".htm"):
+        if b"\x00" in header or b"<" not in stripped:
+            return None
+        return "web"
+
+    if stripped.lower().startswith(_HTML_STARTERS):
+        return "web"
     return None
 
 
 def copy_original(path: Path | str, file_hash: str) -> Path:
-    """Copy an uploaded file into data/originals/<hash>.<ext> if not already there.
-
-    The copy is never modified after creation.
-    """
     path = Path(path)
     dest = settings.originals_dir / f"{file_hash}{path.suffix.lower()}"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -150,7 +146,6 @@ def copy_original(path: Path | str, file_hash: str) -> Path:
 
 
 def remove_from_inbox(path: Path | str) -> None:
-    """Remove a file from the inbox after successful ingestion."""
     path = Path(path)
     try:
         path.unlink(missing_ok=True)
@@ -159,7 +154,6 @@ def remove_from_inbox(path: Path | str) -> None:
 
 
 def move_to_rejected(path: Path | str) -> None:
-    """Move a failed file into data/inbox/_rejected/ for inspection."""
     path = Path(path)
     try:
         rejected_dir = settings.inbox_dir / "_rejected"
@@ -184,9 +178,7 @@ def enqueue_ingest_job(
         payload["inbox_path"] = str(inbox_path)
     job_id = create_job(conn, type="ingest", payload=payload)
     payload["job_id"] = job_id
-    conn.execute(
-        "UPDATE jobs SET payload = ? WHERE id = ?", (json.dumps(payload), job_id)
-    )
+    conn.execute("UPDATE jobs SET payload = ? WHERE id = ?", (json.dumps(payload), job_id))
     conn.commit()
     return job_id
 
@@ -199,18 +191,11 @@ def ingest_file(
     mime: str | None = None,
     inbox_path: Path | str | None = None,
 ) -> dict:
-    """Preserve the original and enqueue validation/ingestion for a file.
-
-    Invalid file contents are recorded as failed jobs by the worker, so
-    watched-folder files remain visible with an error instead of disappearing.
-    """
     path = Path(path)
     file_hash = hash_file(path)
-
     existing = get_document_by_hash(conn, file_hash)
     if existing is not None:
         raise DuplicateDocumentError(existing)
-
     original_path = copy_original(path, file_hash)
     doc = create_document(
         conn,
@@ -222,17 +207,29 @@ def ingest_file(
         size_bytes=path.stat().st_size,
     )
     job_id = enqueue_ingest_job(conn, doc["id"], file_hash, inbox_path)
-
     return {"document": doc, "job_id": job_id}
 
 
-async def handle_ingest_job(payload: dict) -> dict:
-    """Job handler for ingest jobs.
+def _run_extraction(document_id: int, title: str, original_path: Path, kind: str, progress_queue):
+    def progress_cb(done: int, total: int) -> None:
+        try:
+            progress_queue.put_nowait((done, total))
+        except Exception:
+            pass
 
-    Marks the document processing, verifies the original is on disk,
-    then marks it ready.  On success removes the file from the inbox.
-    On failure moves it to inbox/_rejected/.
-    """
+    result = extract_document(
+        original_path, document_id=document_id, kind=kind, progress_cb=progress_cb
+    )
+    conn = connect()
+    try:
+        # Remove page images for the new extraction only after we have new pages.
+        store_extraction(conn, document_id=document_id, title=title, result=result)
+    finally:
+        conn.close()
+    return result
+
+
+async def handle_ingest_job(payload: dict) -> dict:
     document_id = int(payload["document_id"])
     job_id = payload.get("job_id")
     inbox_path = payload.get("inbox_path")
@@ -264,32 +261,67 @@ async def handle_ingest_job(payload: dict) -> dict:
         if classify_kind(original_path) != detected:
             raise IngestError(f"file type mismatch: {original_path.name}")
 
+        # Preserve previous derived state until the replacement is fully committed.
+        # If extraction fails, the previous chunks/pages stay intact.
+        progress_queue: asyncio.Queue = asyncio.Queue()
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                _run_extraction,
+                document_id,
+                doc["title"],
+                original_path,
+                detected,
+                progress_queue,
+            )
+        )
+        while not task.done():
+            try:
+                done, total = await asyncio.wait_for(progress_queue.get(), timeout=0.2)
+                pct = 15.0 + (75.0 * done / max(total, 1))
+                if job_id is not None:
+                    update_progress(conn, job_id, pct)
+                await broadcaster.publish(
+                    job_id if job_id is not None else document_id,
+                    {
+                        "kind": "progress",
+                        "document_id": document_id,
+                        "status": "processing",
+                        "progress": round(pct, 1),
+                    },
+                )
+            except TimeoutError:
+                pass
+        result = await task
+
+        final_status = result.status if result.status in {"ready", "needs_review"} else "ready"
         if job_id is not None:
-            update_progress(conn, job_id, 90.0)
-        set_status(conn, document_id, "ready")
+            update_progress(conn, job_id, 100.0)
+        set_status(conn, document_id, final_status)
         await broadcaster.publish(
             job_id if job_id is not None else document_id,
             {
                 "kind": "progress",
                 "document_id": document_id,
-                "status": "ready",
+                "status": final_status,
                 "progress": 100.0,
             },
         )
 
         if inbox_path:
             remove_from_inbox(inbox_path)
-
-        return {"document_id": document_id, "status": "ready"}
-    except Exception as exc:  # noqa: BLE001 - mark failed, keep queue alive
+        return {
+            "document_id": document_id,
+            "status": final_status,
+            "chunks": len(result.chunks),
+            "pages": len(result.pages),
+            "scanned_pages": result.scanned_pages,
+        }
+    except Exception as exc:  # noqa: BLE001
+        # On failure, keep the previous good derived data (if any) and mark failed.
         set_status(conn, document_id, "failed", error=str(exc))
         await broadcaster.publish(
             job_id if job_id is not None else document_id,
-            {
-                "kind": "failed",
-                "document_id": document_id,
-                "error": str(exc),
-            },
+            {"kind": "failed", "document_id": document_id, "error": str(exc)},
         )
         if inbox_path:
             move_to_rejected(inbox_path)

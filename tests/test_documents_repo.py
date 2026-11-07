@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 
 from app.core.db import connect, run_migrations
 from app.services.documents import (
@@ -15,7 +15,6 @@ from app.services.documents import (
 
 
 def must(value):
-    """Fail the test clearly if a lookup returned None, and satisfy the type checker."""
     assert value is not None, "expected a document but got None"
     return value
 
@@ -30,7 +29,7 @@ def conn(tmp_path):
 
 def test_migration_tables(conn):
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"documents", "jobs", "audit_log"} <= tables
+    assert {"documents", "jobs", "audit_log", "pages", "chunks", "chunks_fts"} <= tables
 
 
 def test_create_document(conn):
@@ -45,7 +44,6 @@ def test_duplicate_hash(conn):
     with pytest.raises(DuplicateDocumentError) as ei:
         create_document(conn, kind="note", title="t2", path="p2", file_hash="abc")
     assert ei.value.existing["id"] == d1["id"]
-    # the failed insert must not leave a second row behind
     assert count_documents(conn) == 1
 
 

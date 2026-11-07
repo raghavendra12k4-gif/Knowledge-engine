@@ -1,9 +1,12 @@
-import json
+﻿import json
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-KINDS = ("note", "pdf", "docx", "image", "web", "report", "text")
+logger = logging.getLogger(__name__)
+
+KINDS = ("note", "pdf", "docx", "pptx", "image", "web", "report", "text")
 STATUSES = ("queued", "processing", "ready", "needs_review", "failed")
 
 
@@ -47,7 +50,6 @@ def create_document(
         conn.rollback()
         existing = get_document_by_hash(conn, file_hash) if file_hash else None
         if existing is None:
-            # Not a duplicate-hash problem: let the real error surface.
             raise
         raise DuplicateDocumentError(existing) from None
     doc = get_document(conn, cur.lastrowid)
@@ -156,19 +158,40 @@ def delete_document(conn, doc_id) -> bool:
     doc = get_document(conn, doc_id)
     if doc is None:
         return False
-    # Remove associated jobs.
+    # Remove derived A2 data explicitly (FTS rows are not always FK-cascaded).
+    try:
+        conn.execute("DELETE FROM chunks_fts WHERE document_id = ?", (doc_id,))
+    except sqlite3.Error:
+        logger.exception("Failed to delete FTS rows for document %s", doc_id)
+    try:
+        conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
+    except sqlite3.Error:
+        logger.exception("Failed to delete chunk rows for document %s", doc_id)
+    try:
+        conn.execute("DELETE FROM pages WHERE document_id = ?", (doc_id,))
+    except sqlite3.Error:
+        logger.exception("Failed to delete page rows for document %s", doc_id)
     conn.execute("DELETE FROM jobs WHERE json_extract(payload, '$.document_id') = ?", (doc_id,))
     cur = conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
     conn.commit()
     if cur.rowcount <= 0:
         return False
-    # Clean up original file only if no other document references it.
+    try:
+        import shutil
+
+        from app.core.config import settings
+
+        pages_dir = settings.pages_dir / str(doc_id)
+        if pages_dir.exists():
+            shutil.rmtree(pages_dir, ignore_errors=True)
+    except OSError:
+        logger.exception("Could not delete page images for document %s", doc_id)
     remaining = conn.execute(
-        "SELECT 1 FROM documents WHERE file_hash = ? LIMIT 1", (doc["file_hash"],)
+        "SELECT 1 FROM documents WHERE file_hash = ? LIMIT 1", (doc.get("file_hash"),)
     ).fetchone()
     if remaining is None and doc.get("path"):
         try:
             Path(doc["path"]).unlink(missing_ok=True)
         except OSError:
-            pass
+            logger.exception("Could not delete original file for document %s", doc_id)
     return True

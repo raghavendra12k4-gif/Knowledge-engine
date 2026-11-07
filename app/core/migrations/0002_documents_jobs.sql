@@ -1,6 +1,8 @@
+-- audit_log is defined in 0001_init.sql; it is intentionally not repeated here.
+
 CREATE TABLE IF NOT EXISTS documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL CHECK (kind IN ('note','pdf','docx','image','web','report','text')),
+    kind TEXT NOT NULL CHECK (kind IN ('note','pdf','docx','pptx','image','web','report','text')),
     title TEXT NOT NULL,
     path TEXT NOT NULL,
     source_url TEXT,
@@ -9,7 +11,6 @@ CREATE TABLE IF NOT EXISTS documents (
     size_bytes INTEGER,
     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','processing','ready','needs_review','failed')),
     error TEXT,
-    ocr_quality REAL,
     language TEXT,
     tags TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
@@ -34,11 +35,3 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    level TEXT NOT NULL,
-    event TEXT NOT NULL,
-    detail TEXT NOT NULL DEFAULT '{}',
-    at TEXT NOT NULL
-);

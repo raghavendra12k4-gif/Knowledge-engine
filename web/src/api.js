@@ -1,4 +1,4 @@
-const BASE = "/api";
+﻿const BASE = "/api";
 
 async function getJSON(path) {
   const res = await fetch(path);
@@ -12,7 +12,10 @@ async function postJSON(path, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))).detail || res.statusText;
+    throw new Error(detail);
+  }
   return res.json();
 }
 
@@ -24,6 +27,10 @@ export const listDocuments = (params = {}) => {
 };
 
 export const getDocument = (id) => getJSON(`${BASE}/documents/${id}`);
+export const getDocumentChunks = (id) => getJSON(`${BASE}/documents/${id}/chunks`);
+export const getDocumentPages = (id) => getJSON(`${BASE}/documents/${id}/pages`);
+export const pageImageUrl = (docId, pageNo) =>
+  `${BASE}/documents/${docId}/pages/${pageNo}/image`;
 
 export const deleteDocument = (id) =>
   fetch(`${BASE}/documents/${id}`, { method: "DELETE" }).then((res) => {
@@ -62,5 +69,6 @@ export const subscribeJobEvents = (jobId, onEvent) => {
     es.addEventListener(name, handler);
   }
   es.onmessage = handler;
+  es.onerror = () => es.close();
   return es;
 };

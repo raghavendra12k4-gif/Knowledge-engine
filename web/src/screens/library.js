@@ -1,6 +1,5 @@
 import {
   deleteDocument,
-  getDocument,
   listDocuments,
   reprocessDocument,
   subscribeJobEvents,
@@ -91,6 +90,9 @@ export function mountLibrary(container) {
 
   const activeSources = new Map();
   let pendingDuplicateDoc = null;
+  // Fingerprint of the last rendered data. The table is only rebuilt when it changes,
+  // so buttons keep focus and the page does not flicker on every poll.
+  let lastSnapshot = null;
 
   browseBtn.addEventListener("click", () => fileInput.click());
 
@@ -123,7 +125,7 @@ export function mountLibrary(container) {
   duplicateOpen.addEventListener("click", async () => {
     if (pendingDuplicateDoc) {
       try {
-        await openDocument(pendingDuplicateDoc.id);
+        openDocument(pendingDuplicateDoc.id);
       } catch (err) {
         showError(`Could not open document: ${err.message}`);
       }
@@ -149,9 +151,18 @@ export function mountLibrary(container) {
 
   async function loadDocuments() {
     const data = await listDocuments();
+    const docs = data.documents || [];
     libraryError.hidden = true;
-    renderDocuments(data.documents || []);
-    for (const doc of data.documents || []) {
+
+    const snapshot = JSON.stringify(
+      docs.map((d) => [d.id, d.title, d.kind, d.status, d.error, d.job_id, d.job_progress]),
+    );
+    if (snapshot !== lastSnapshot) {
+      lastSnapshot = snapshot;
+      renderDocuments(docs);
+    }
+
+    for (const doc of docs) {
       if (doc.job_id && ["queued", "processing"].includes(doc.status)) {
         trackJob(doc.id, doc.job_id);
       }
@@ -166,31 +177,28 @@ export function mountLibrary(container) {
   function trackJob(docId, jobId) {
     if (activeSources.has(jobId)) return;
     const source = subscribeJobEvents(jobId, (event) => {
+      // Progress ticks update the bar in place; no table rebuild.
       const fill = container.querySelector(`#fill-${docId}`);
-      if (fill && event.progress != null) {
+      if (fill && event && event.progress != null) {
         fill.style.width = `${Math.max(0, Math.min(100, event.progress))}%`;
       }
-      if (
-        event.kind === "completed" ||
-        event.kind === "failed" ||
-        ["done", "failed", "cancelled"].includes(event.status)
-      ) {
+      const finished =
+        event &&
+        (event.kind === "completed" ||
+          event.kind === "failed" ||
+          ["done", "failed", "cancelled"].includes(event.status));
+      if (finished) {
         source.close();
         activeSources.delete(jobId);
+        // Only a finished job changes status/error text, so refresh once here.
+        loadDocuments().catch((err) => showError(`Could not refresh library: ${err.message}`));
       }
-      loadDocuments().catch((err) => showError(`Could not refresh library: ${err.message}`));
     });
     activeSources.set(jobId, source);
   }
 
   async function openDocument(id) {
-    const doc = await getDocument(id);
-    detailTitle.textContent = doc.title;
-    detailKind.textContent = doc.kind;
-    detailStatus.textContent = doc.status;
-    detailError.textContent = doc.error || "None";
-    detailCreated.textContent = doc.created_at;
-    detailDialog.showModal();
+    window.location.hash = `#/document/${id}`;
   }
 
   function renderDocuments(docs) {
@@ -232,7 +240,7 @@ export function mountLibrary(container) {
     const id = Number(btn.dataset.id);
     if (btn.classList.contains("btn-open")) {
       try {
-        await openDocument(id);
+        openDocument(id);
       } catch (err) {
         showError(`Could not open document: ${err.message}`);
       }

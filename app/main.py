@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.core.db import connect, init_db
 from app.core.jobs import requeue_stale_jobs, run_worker
 from app.core.watchdog import start_watchdog
-from app.routers import documents, health, jobs
+from app.routers import chunks, documents, health, jobs
 from app.services.ingest import handle_ingest_job
 
 
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router, prefix="/api")
     app.include_router(documents.router, prefix="/api")
+    app.include_router(chunks.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     return app
 

@@ -347,3 +347,23 @@ code {
   display: flex;
   gap: 6px;
 }
+
+/* A2 document viewer */
+.viewer { padding: 24px; }
+.viewer-header { margin-bottom: 16px; }
+.viewer-meta { color: var(--text-h); margin-top: 4px; }
+.viewer-body { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; align-items: start; }
+.viewer-pages, .viewer-chunks { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg); min-height: 200px; }
+.viewer-page { margin-bottom: 16px; }
+.viewer-page-label { font-size: 12px; color: var(--text-h); margin-bottom: 6px; }
+.viewer-page-image { position: relative; display: inline-block; max-width: 100%; }
+.viewer-page-image img { display: block; max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 4px; }
+.viewer-highlight { position: absolute; border: 2px solid #ffbf00; background: rgba(255, 191, 0, 0.18); pointer-events: none; border-radius: 2px; }
+.viewer-chunks-list { display: flex; flex-direction: column; gap: 10px; max-height: 75vh; overflow: auto; }
+.chunk-card { text-align: left; border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); color: var(--text-h); padding: 10px; cursor: pointer; }
+.chunk-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-border); }
+.chunk-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--text-h); margin-bottom: 6px; }
+.chunk-path { opacity: 0.85; }
+.chunk-text { margin: 0; white-space: pre-wrap; font: 13px/1.45 var(--mono); color: var(--text-h); }
+.viewer-empty { color: var(--text-h); }
+@media (max-width: 900px) { .viewer-body { grid-template-columns: 1fr; } }

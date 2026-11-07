@@ -1,9 +1,9 @@
-import "./styles/tokens.css";
+﻿import "./styles/tokens.css";
 import "./style.css";
 import { health } from "./api.js";
 import { mountLibrary } from "./screens/library.js";
+import { mountViewer } from "./screens/viewer.js";
 
-// Minimal client-side router
 const app = document.getElementById("app");
 let currentMount = null;
 
@@ -43,8 +43,11 @@ function unmountCurrent() {
 
 function navigate(path) {
   unmountCurrent();
+  const docMatch = (path || "").match(/^#\/document\/(\d+)$/);
   if (path === "#/library") {
     currentMount = mountLibrary(app);
+  } else if (docMatch) {
+    currentMount = mountViewer(app, Number(docMatch[1]));
   } else {
     renderHome();
   }

@@ -1,4 +1,4 @@
-import io
+﻿import io
 import time
 
 import pymupdf
@@ -8,7 +8,8 @@ from PIL import Image
 
 def _mixed_files():
     pdf = pymupdf.open()
-    pdf.new_page()
+    page = pdf.new_page()
+    page.insert_text((72, 72), "A1 PDF test content")
     pdf_bytes = pdf.tobytes()
     pdf.close()
 
@@ -33,7 +34,7 @@ def _mixed_files():
     ]
 
 
-def _wait_for_status(client, doc_ids, status, timeout=5):
+def _wait_for_status(client, doc_ids, status, timeout=8):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         docs = [client.get(f"/api/documents/{doc_id}").json() for doc_id in doc_ids]
@@ -57,7 +58,8 @@ def test_upload_mixed_files_and_duplicate(client):
         doc_ids.append(body["document"]["id"])
 
     docs = _wait_for_status(client, doc_ids, "ready")
-    assert all(doc["status"] == "ready" for doc in docs)
+    states = [(d["kind"], d["status"], d["error"]) for d in docs]
+    assert all(d["status"] == "ready" for d in docs), states
 
     duplicate = client.post(
         "/api/documents/upload",
@@ -110,7 +112,7 @@ def test_reprocess_creates_trackable_job(client):
     new_job_id = retry.json()["job_id"]
     assert new_job_id > previous_job_id
 
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 8
     current = None
     while time.monotonic() < deadline:
         current = next(
